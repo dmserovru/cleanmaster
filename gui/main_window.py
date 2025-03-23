@@ -12,6 +12,8 @@ from PyQt5.QtGui import QIcon, QColor
 from core.sync_downloader import DownloadManager
 from plugins.telegram_bot import TelegramBot
 from config.settings import settings
+from urllib.parse import urlparse
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -127,10 +129,64 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            # Проверяем, является ли URL ссылкой на Microsoft Store
+            is_ms_store = "microsoft.com" in url and any(part.upper().startswith('9N') for part in url.split('/'))
+            
+            if is_ms_store:
+                # Предупреждаем пользователя о Microsoft Store
+                reply = QMessageBox.question(
+                    self, 
+                    "Microsoft Store",
+                    "Приложения из Microsoft Store нельзя скачать напрямую. Открыть в Microsoft Store?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    # Ищем ID продукта и открываем в Microsoft Store
+                    product_id = ""
+                    for part in url.split('/'):
+                        if '9N' in part.upper():
+                            product_id = part.split('?')[0]
+                            break
+                    
+                    if product_id:
+                        ms_store_url = f"ms-windows-store://pdp/?productid={product_id}"
+                        # Открываем Microsoft Store
+                        import webbrowser
+                        webbrowser.open(ms_store_url)
+                    else:
+                        QMessageBox.warning(self, "Ошибка", "Не удалось определить ID продукта Microsoft Store")
+                    return
+            
+            # Корректная обработка имени файла
+            filename = os.path.basename(urlparse(url).path).split("?")[0]
+            
+            # Для Microsoft Store ссылок создаем специальное имя файла
+            if "microsoft.com" in url:
+                # Пытаемся извлечь ID продукта
+                ms_id = ""
+                for part in url.split('/'):
+                    if '9N' in part.upper():
+                        ms_id = part.split('?')[0]
+                        break
+                
+                if ms_id:
+                    filename = f"MicrosoftStore_{ms_id}.appx"
+                else:
+                    filename = f"MicrosoftStore_app_{int(time.time())}.appx"
+            
+            # Если имя файла пустое, используем дефолтное
+            if not filename:
+                filename = f"download_{int(time.time())}"
+            
+            # Создаем полный путь сохранения
+            save_path = self.download_folder / filename
+            
             # Добавляем загрузку
-            self.download_manager.add_download(url, self.download_folder / os.path.basename(url))
+            self.download_manager.add_download(url, save_path)
             self.url_input.clear()
-            logger.info(f"Started download from {url}")
+            logger.info(f"Started download from {url} to {save_path}")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось начать загрузку: {str(e)}")
             logger.error(f"Error starting download: {e}")

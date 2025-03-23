@@ -57,10 +57,80 @@ def get_softportal_direct_url(url: str) -> str:
         logger.error(f"Ошибка при получении прямой ссылки с softportal.com: {e}")
         raise
 
+def get_microsoft_store_url(url: str) -> str:
+    """Получение прямой ссылки на скачивание из Microsoft Store"""
+    try:
+        # Создаем сессию для сохранения cookies и обработки редиректов
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Referer': 'https://apps.microsoft.com/',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site',
+            'Origin': 'https://apps.microsoft.com'
+        })
+        
+        logger.info(f"Получение информации из Microsoft Store: {url}")
+        
+        # Проверяем URL и определяем тип действия
+        if '9N' in url.upper():
+            # Ищем ID продукта
+            product_id = None
+            for part in url.split('/'):
+                if '9N' in part.upper():
+                    product_id = part.split('?')[0]
+                    break
+            
+            if product_id:
+                logger.info(f"Найден ID продукта Microsoft Store: {product_id}")
+                
+                # Для Microsoft Store мы не можем напрямую скачать файл
+                # Возвращаем специальный URL для уведомления пользователя
+                return f"ms-windows-store://pdp/?productid={product_id}"
+            
+        # Попробуем открыть URL напрямую
+        response = session.get(url, allow_redirects=True, stream=True)
+        response.raise_for_status()
+        
+        # Проверяем Content-Type
+        content_type = response.headers.get('Content-Type', '')
+        if 'application/octet-stream' in content_type or 'application/x-msdownload' in content_type:
+            logger.info(f"Успешно получена прямая ссылка: {response.url}")
+            return response.url
+        elif 'text/html' in content_type:
+            logger.warning(f"URL вернул HTML вместо файла. Попытка поиска ссылки в HTML.")
+            
+            # Попытка найти ссылку на файл в HTML
+            download_match = re.search(r'href=[\'"]([^\'"]+\.(?:exe|msi|appx|msix|zip))[\'"]', response.text)
+            if download_match:
+                direct_url = download_match.group(1)
+                if not direct_url.startswith('http'):
+                    base_url = response.url
+                    direct_url = f"{base_url.split('/')[0]}//{base_url.split('/')[2]}{direct_url}"
+                
+                logger.info(f"Найдена ссылка на скачивание в HTML: {direct_url}")
+                return direct_url
+        
+        # Если не смогли найти прямую ссылку
+        logger.warning(f"Не удалось получить прямую ссылку из Microsoft Store. Content-Type: {content_type}")
+        return url
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении ссылки из Microsoft Store: {e}")
+        # В случае ошибки возвращаем исходный URL
+        return url
+
 def get_direct_url(url: str) -> str:
     """Получение прямой ссылки на скачивание в зависимости от сайта"""
     if "softportal.com" in url:
         return get_softportal_direct_url(url)
+    elif "get.microsoft.com" in url or "apps.microsoft.com" in url:
+        return get_microsoft_store_url(url)
     return url
 
 def sanitize_filename(filename: str) -> str:
@@ -209,19 +279,94 @@ class DownloadManager:
             # Получаем прямую ссылку на скачивание
             direct_url = get_direct_url(url)
             
+            # Проверяем, не является ли это Microsoft Store URL
+            if direct_url.startswith("ms-windows-store://"):
+                # Создаем объект загрузки с информацией о Microsoft Store
+                product_id = direct_url.split("productid=")[1]
+                filename = f"MicrosoftStore_{product_id}.appx"
+                file_path = path if isinstance(path, Path) else Path(path)
+                
+                # Если путь - это директория, добавляем имя файла
+                if file_path.is_dir():
+                    file_path = file_path / filename
+                
+                # Создаем загрузку, но отмечаем её как "Не поддерживается"
+                download = Download(url, file_path, filename)
+                download.status = "Не поддерживается"
+                download.virus_scan_result = {
+                    "status": "info",
+                    "message": "Загрузка из Microsoft Store не поддерживается напрямую. Используйте приложение Microsoft Store.",
+                    "link": f"https://www.microsoft.com/store/productId/{product_id}"
+                }
+                self.downloads.append(download)
+                return
+            
             # Создаем сессию для скачивания
             session = requests.Session()
             session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Referer': 'https://apps.microsoft.com/'
             })
             
-            # Создаем объект загрузки
-            filename = sanitize_filename(os.path.basename(urlparse(direct_url).path))
+            # Обрабатываем Microsoft Store URL
+            if "microsoft.com" in url:
+                # Пытаемся получить ID из URL
+                ms_id = ""
+                
+                # Проверяем на наличие 9N ID (типичный формат для Microsoft Store)
+                for part in url.split('/'):
+                    if '9N' in part.upper():
+                        # Удаляем query параметры из ID
+                        ms_id = part.split('?')[0]
+                        break
+                
+                if ms_id:
+                    filename = f"MicrosoftStore_{ms_id}.appx"
+                    logger.info(f"Использую имя файла для Microsoft Store: {filename}")
+                else:
+                    filename = f"MicrosoftStore_app_{int(time.time())}.appx"
+                    logger.info(f"Использую сгенерированное имя файла для Microsoft Store: {filename}")
+            else:
+                # Обычная ссылка - получаем имя файла из неё
+                filename = sanitize_filename(os.path.basename(urlparse(url).path))
+                if not filename or filename == "download":
+                    filename = f"download_{int(time.time())}"
+            
+            # Обрабатываем путь для сохранения файла
             file_path = path if isinstance(path, Path) else Path(path)
             
             # Если path - это директория, добавляем имя файла
-            if file_path.is_dir() or not file_path.suffix:
+            if file_path.is_dir():
                 file_path = file_path / filename
+            # Если path не имеет расширения, это может быть директория, которой нет, или неполный путь
+            elif not file_path.suffix:
+                # Проверяем существует ли родительская директория
+                if file_path.parent.exists():
+                    # Если родительская директория существует, значит это полный путь без расширения
+                    # Проверяем, это файл или директория
+                    if file_path.exists() and file_path.is_dir():
+                        file_path = file_path / filename
+                    else:
+                        # Используем указанное имя и добавляем расширение из оригинала
+                        _, ext = os.path.splitext(filename)
+                        if ext:  # Если у оригинала есть расширение
+                            file_path = Path(f"{file_path}{ext}")
+                        else:
+                            file_path = file_path
+                else:
+                    # Родительская директория не существует, создаем нужные директории
+                    os.makedirs(file_path.parent, exist_ok=True)
+                    if '.' in file_path.name:  # Если в имени есть точка, вероятно это файл
+                        pass  # Оставляем как есть
+                    else:
+                        # Это директория - добавляем имя файла
+                        file_path = file_path / filename
+            
+            logger.info(f"Путь для сохранения файла: {file_path}")
             
             download = Download(url, file_path, filename)
             self.downloads.append(download)
@@ -259,9 +404,14 @@ class DownloadManager:
                         os.makedirs(parent_dir, exist_ok=True)
                     
                     # Получаем размер файла
-                    response = session.head(direct_url)
-                    total_size = int(response.headers.get('content-length', 0))
-                    download.size = total_size
+                    try:
+                        response = session.head(direct_url)
+                        total_size = int(response.headers.get('content-length', 0))
+                        download.size = total_size
+                    except Exception as e:
+                        logger.warning(f"Не удалось получить размер файла: {e}")
+                        total_size = 0
+                        download.size = 0
                     
                     # Устанавливаем начальные значения
                     download.status = "Загрузка"
@@ -271,59 +421,109 @@ class DownloadManager:
                     # Открываем файл для записи
                     with open(download.path, 'wb') as f:
                         # Скачиваем файл с отображением прогресса
-                        response = session.get(direct_url, stream=True)
-                        response.raise_for_status()
-                        
-                        downloaded_size = 0
-                        start_time = time.time()
-                        last_update_time = start_time
-                        chunk_size = 8192 * 4  # Увеличен размер чанка для оптимизации
-                        
-                        for chunk in response.iter_content(chunk_size=chunk_size):
-                            if download.is_canceled or download.status == "Отменено":
-                                if os.path.exists(download.path):
-                                    os.remove(download.path)
-                                return
+                        try:
+                            response = session.get(direct_url, stream=True, timeout=30)
+                            response.raise_for_status()
+                            
+                            # Если это бинарный контент, сохраняем
+                            content_type = response.headers.get('Content-Type', '')
+                            if 'text/html' in content_type and 'microsoft.com' in url:
+                                # Для Microsoft Store может потребоваться дополнительная обработка
+                                logger.warning(f"Получен HTML контент для Microsoft Store URL. Content-Type: {content_type}")
                                 
-                            if download.is_paused or download.status == "Пауза":
-                                while download.is_paused or download.status == "Пауза":
-                                    time.sleep(0.1)
-                                    if download.is_canceled or download.status == "Отменено":
-                                        if os.path.exists(download.path):
-                                            os.remove(download.path)
-                                        return
+                                # Проверяем содержимое на наличие сообщения об ошибке Microsoft Store
+                                ms_store_error = re.search(r"ms-windows-store://", response.text)
+                                if ms_store_error:
+                                    logger.error("Требуется приложение Microsoft Store для загрузки")
+                                    download.status = "Не поддерживается"
+                                    download.virus_scan_result = {
+                                        "status": "info",
+                                        "message": "Требуется приложение Microsoft Store для загрузки",
+                                        "link": f"https://www.microsoft.com/store/productId/{ms_id}" if ms_id else ""
+                                    }
+                                    return
+                                
+                                # Ищем ссылку на скачивание в HTML
+                                download_match = re.search(r'href=[\'"]([^\'"]+\.(?:exe|msi|appx|msix|zip))[\'"]', response.text)
+                                if download_match:
+                                    direct_url = download_match.group(1)
+                                    if not direct_url.startswith('http'):
+                                        base_url = response.url
+                                        direct_url = f"{base_url.split('/')[0]}//{base_url.split('/')[2]}{direct_url}"
                                     
-                            if chunk:
-                                f.write(chunk)
-                                downloaded_size += len(chunk)
-                                download.bytes_downloaded = downloaded_size
-                                
-                                # Прогресс
-                                if total_size > 0:
-                                    download.progress = (downloaded_size / total_size) * 100
-                                
-                                # Обновляем скорость каждую секунду
-                                current_time = time.time()
-                                if current_time - last_update_time >= 1:
-                                    elapsed = current_time - start_time
-                                    if elapsed > 0:
-                                        speed = downloaded_size / elapsed
-                                        download.speed = format_speed(speed)
-                                    last_update_time = current_time
-                        
-                        # Завершаем загрузку
-                        if downloaded_size > 0:
-                            if total_size > 0 and downloaded_size >= total_size * 0.99:  # учитываем погрешность
-                                download.progress = 100
-                                download.status = "Завершено"
-                                # Вычисляем хеши файла
-                                self._calculate_hashes(download)
+                                    logger.info(f"Найдена ссылка на скачивание в HTML: {direct_url}")
+                                    
+                                    # Повторяем запрос с найденной ссылкой
+                                    response = session.get(direct_url, stream=True, timeout=30)
+                                    response.raise_for_status()
+                                else:
+                                    logger.error("Не найдена ссылка на скачивание в HTML")
+                                    download.status = "Ошибка"
+                                    return
+                            
+                            # Проверяем Content-Type после перенаправлений
+                            final_content_type = response.headers.get('Content-Type', '')
+                            if 'text/html' in final_content_type:
+                                logger.error(f"Получен HTML вместо файла. Content-Type: {final_content_type}")
+                                download.status = "Ошибка формата"
+                                return
+                            
+                            downloaded_size = 0
+                            start_time = time.time()
+                            last_update_time = start_time
+                            chunk_size = 8192 * 4  # Увеличен размер чанка для оптимизации
+                            
+                            for chunk in response.iter_content(chunk_size=chunk_size):
+                                if download.is_canceled or download.status == "Отменено":
+                                    if os.path.exists(download.path):
+                                        os.remove(download.path)
+                                    return
+                                    
+                                if download.is_paused or download.status == "Пауза":
+                                    while download.is_paused or download.status == "Пауза":
+                                        time.sleep(0.1)
+                                        if download.is_canceled or download.status == "Отменено":
+                                            if os.path.exists(download.path):
+                                                os.remove(download.path)
+                                            return
+                                        
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded_size += len(chunk)
+                                    download.bytes_downloaded = downloaded_size
+                                    
+                                    # Прогресс
+                                    if total_size > 0:
+                                        download.progress = (downloaded_size / total_size) * 100
+                                    
+                                    # Обновляем скорость каждую секунду
+                                    current_time = time.time()
+                                    if current_time - last_update_time >= 1:
+                                        elapsed = current_time - start_time
+                                        if elapsed > 0:
+                                            speed = downloaded_size / elapsed
+                                            download.speed = format_speed(speed)
+                                        last_update_time = current_time
+                            
+                            # Завершаем загрузку
+                            if downloaded_size > 0:
+                                if total_size > 0 and downloaded_size >= total_size * 0.99:  # учитываем погрешность
+                                    download.progress = 100
+                                    download.status = "Завершено"
+                                    # Вычисляем хеши файла
+                                    self._calculate_hashes(download)
+                                else:
+                                    # Если размер файла неизвестен, но данные были загружены
+                                    download.status = "Завершено"
+                                    self._calculate_hashes(download)
                             else:
-                                # Если размер файла неизвестен, но данные были загружены
-                                download.status = "Завершено"
-                                self._calculate_hashes(download)
-                        else:
-                            download.status = "Ошибка"
+                                download.status = "Ошибка: пустой файл"
+                        except requests.exceptions.Timeout:
+                            logger.error(f"Тайм-аут при скачивании {url}")
+                            download.status = "Ошибка: тайм-аут"
+                        except requests.exceptions.SSLError:
+                            logger.error(f"Ошибка SSL при скачивании {url}")
+                            download.status = "Ошибка: SSL"
                     
                 except requests.exceptions.RequestException as e:
                     logger.error(f"Ошибка сети при скачивании {url}: {e}")
