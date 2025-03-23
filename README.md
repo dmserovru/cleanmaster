@@ -76,6 +76,12 @@ pyinstaller --onefile --windowed --icon=resources/app_icon.ico --name=CleanDownl
 3. Выберите место для сохранения файла
 4. Отслеживайте процесс загрузки в таблице
 
+Доступные команды:
+/start - Начать работу с ботом
+/help - Показать это сообщение
+/check <url> - Проверить ссылку на безопасность
+/about - Информация о боте
+
 ## Сравнение с Download Master
 
 | Функция | CleanDownloader | Download Master |
