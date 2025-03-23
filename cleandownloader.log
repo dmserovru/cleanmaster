@@ -1,17 +1,10 @@
-2025-03-23 12:22:19,441 - __main__ - INFO - Download folder set to C:\Users\yanis\Downloads
-2025-03-23 12:22:19,462 - __main__ - INFO - QApplication created
-2025-03-23 12:22:19,464 - core.sync_downloader - INFO - Download Manager initialized with 5 workers
-2025-03-23 12:22:19,464 - __main__ - INFO - Download manager initialized
-2025-03-23 12:22:20,020 - gui.main_window - INFO - UI elements initialized
-2025-03-23 12:22:20,020 - gui.main_window - INFO - Main window initialized
-2025-03-23 12:22:20,147 - __main__ - INFO - Main window displayed
-2025-03-23 12:22:28,088 - gui.main_window - INFO - Download folder changed to C:\Users\yanis\Downloads
-2025-03-23 12:22:37,761 - gui.main_window - INFO - Started download from https://cs1e5a.4pda.ws/32696475/Asphalt+8_8.2.1b_GP.xapk?s=003d35ebc257e69867dfd08b00000000e916dd398ad3d7c79afc40cd588583d4
-2025-03-23 12:22:37,764 - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): cs1e5a.4pda.ws:443
-2025-03-23 12:22:38,625 - urllib3.connectionpool - DEBUG - https://cs1e5a.4pda.ws:443 "HEAD /32696475/Asphalt+8_8.2.1b_GP.xapk?s=003d35ebc257e69867dfd08b00000000e916dd398ad3d7c79afc40cd588583d4 HTTP/1.1" 200 0
-2025-03-23 12:22:56,729 - gui.main_window - INFO - Started download from https://cs1e5a.4pda.ws/32696475/Asphalt+8_8.2.1b_GP.xapk?s=003d35ebc257e69867dfd08b00000000e916dd398ad3d7c79afc40cd588583d4
-2025-03-23 12:22:56,731 - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): cs1e5a.4pda.ws:443
-2025-03-23 12:22:57,408 - urllib3.connectionpool - DEBUG - https://cs1e5a.4pda.ws:443 "HEAD /32696475/Asphalt+8_8.2.1b_GP.xapk?s=003d35ebc257e69867dfd08b00000000e916dd398ad3d7c79afc40cd588583d4 HTTP/1.1" 200 0
-2025-03-23 12:22:57,411 - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): cs1e5a.4pda.ws:443
-2025-03-23 12:22:58,209 - urllib3.connectionpool - DEBUG - https://cs1e5a.4pda.ws:443 "GET /32696475/Asphalt+8_8.2.1b_GP.xapk?s=003d35ebc257e69867dfd08b00000000e916dd398ad3d7c79afc40cd588583d4 HTTP/1.1" 200 129652360
-2025-03-23 12:23:32,824 - core.sync_downloader - INFO - Download Manager shut down
+2025-03-23 12:55:56,119 - __main__ - INFO - Download folder set to C:\Users\yanis\Downloads
+2025-03-23 12:55:56,136 - __main__ - INFO - QApplication created
+2025-03-23 12:55:56,137 - core.sync_downloader - INFO - Download Manager initialized with 5 workers
+2025-03-23 12:55:56,137 - __main__ - INFO - Download manager initialized
+2025-03-23 12:55:56,138 - __main__ - ERROR - Application error: TelegramBot.__init__() takes 2 positional arguments but 4 were given
+Traceback (most recent call last):
+  File "C:\Users\yanis\Documents\git\cleanmaster\main.py", line 59, in main
+    bot = TelegramBot(telegram_token, download_manager, vt_api_key)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: TelegramBot.__init__() takes 2 positional arguments but 4 were given

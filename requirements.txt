@@ -1,2 +1,8 @@
 PyQt5==5.15.9
-requests==2.31.0
+requests>=2.31.0
+python-telegram-bot>=20.8
+PyQt6>=6.6.1
+aiohttp>=3.9.3
+python-dotenv>=1.0.0
+pydantic>=2.6.1
+nest_asyncio>=1.6.0

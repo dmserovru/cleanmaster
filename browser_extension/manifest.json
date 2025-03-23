@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "CleanMaster Downloader",
+  "version": "1.0",
+  "description": "Перехватывает скачивания для CleanMaster",
+  "permissions": [
+    "webRequest",
+    "webRequestBlocking",
+    "downloads",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+} 

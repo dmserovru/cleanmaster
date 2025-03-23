@@ -1,13 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+
 block_cipher = None
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('.env', '.'), ('resources', 'resources')],
-    hiddenimports=['PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'core', 'gui', 'config', 'plugins'],
+    datas=[],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -39,5 +41,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='resources/app_icon.ico',
-) 
+    icon=['resources\\app_icon.ico'],
+)

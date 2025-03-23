@@ -4,19 +4,24 @@ import logging
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFileDialog, QMessageBox, QLabel
+    QHeaderView, QFileDialog, QMessageBox, QLabel, QToolTip, 
+    QMenu, QAction, QToolBar
 )
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, QPoint
+from PyQt5.QtGui import QIcon, QColor
 from core.sync_downloader import DownloadManager
-from config.settings import config
+from plugins.telegram_bot import TelegramBot
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 class MainWindow(QMainWindow):
-    def __init__(self, download_manager: DownloadManager, download_folder: Path):
+    def __init__(self, download_manager: DownloadManager, telegram_bot: TelegramBot):
         super().__init__()
         self.download_manager = download_manager
-        self.download_folder = download_folder
+        self.telegram_bot = telegram_bot
+        self.download_folder = Path.home() / settings.download_folder
+        self.download_folder.mkdir(parents=True, exist_ok=True)
         self.init_ui()
         
         # Таймер для обновления информации о загрузках
@@ -29,7 +34,7 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Инициализация пользовательского интерфейса"""
         self.setWindowTitle("CleanDownloader")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 900, 600)
 
         # Создаем центральный виджет
         central_widget = QWidget()
@@ -65,13 +70,23 @@ class MainWindow(QMainWindow):
         folder_info.addWidget(folder_label)
         folder_info.addWidget(self.folder_path_label)
         folder_info.addStretch()
+        
+        # Добавляем кнопки для управления историей загрузок
+        self.clear_completed_button = QPushButton("Очистить завершенные")
+        self.clear_completed_button.clicked.connect(self.clear_completed_downloads)
+        folder_info.addWidget(self.clear_completed_button)
+        
+        self.clear_all_button = QPushButton("Очистить все")
+        self.clear_all_button.clicked.connect(self.clear_all_downloads)
+        folder_info.addWidget(self.clear_all_button)
+        
         layout.addLayout(folder_info)
 
         # Создаем таблицу загрузок
         self.downloads_table = QTableWidget()
-        self.downloads_table.setColumnCount(6)
+        self.downloads_table.setColumnCount(7)  # Добавлен столбец для статуса проверки на вирусы
         self.downloads_table.setHorizontalHeaderLabels([
-            "Имя файла", "Размер", "Прогресс", "Скорость", "Статус", "Действия"
+            "Имя файла", "Размер", "Прогресс", "Скорость", "Статус", "Безопасность", "Действия"
         ])
         
         # Настраиваем растяжение колонок
@@ -81,7 +96,12 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Прогресс
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Скорость
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # Статус
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Действия
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Безопасность
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)  # Действия
+        
+        # Добавляем контекстное меню для таблицы
+        self.downloads_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.downloads_table.customContextMenuRequested.connect(self.show_context_menu)
         
         layout.addWidget(self.downloads_table)
 
@@ -120,6 +140,12 @@ class MainWindow(QMainWindow):
         try:
             downloads = self.download_manager.get_all_downloads()
             
+            # Отладочная информация
+            for download in downloads:
+                logger.debug(f"Download info: {download}")
+                for key, value in download.items():
+                    logger.debug(f"Key: {key}, Value: {value}, Type: {type(value)}")
+            
             # Обновляем количество строк
             self.downloads_table.setRowCount(len(downloads))
             
@@ -131,7 +157,7 @@ class MainWindow(QMainWindow):
                 self.set_table_item(row, 1, download['size'])
                 
                 # Прогресс
-                self.set_table_item(row, 2, f"{download['progress']}%")
+                self.set_table_item(row, 2, download['progress'])
                 
                 # Скорость
                 self.set_table_item(row, 3, download['speed'])
@@ -139,36 +165,251 @@ class MainWindow(QMainWindow):
                 # Статус
                 self.set_table_item(row, 4, download['status'])
                 
+                # Безопасность (результаты проверки на вирусы)
+                if "virus_scan" in download:
+                    scan_result = download["virus_scan"]
+                    status = scan_result["status"]
+                    
+                    # Устанавливаем иконку/эмодзи в зависимости от статуса проверки
+                    status_icon = {
+                        "safe": "✅",
+                        "warning": "⚠️",
+                        "danger": "🚨",
+                        "error": "❓",
+                        "pending": "⏳",
+                        "unknown": "❓",
+                        "info": "ℹ️",
+                        "not_found": "❓"
+                    }.get(status, "❓")
+                    
+                    security_item = self.set_table_item(row, 5, status_icon)
+                    
+                    # Устанавливаем цвет фона в зависимости от статуса
+                    colors = {
+                        "safe": QColor(200, 255, 200),  # Светло-зеленый
+                        "warning": QColor(255, 255, 200),  # Светло-желтый
+                        "danger": QColor(255, 200, 200),  # Светло-красный
+                        "pending": QColor(230, 230, 255)  # Светло-синий
+                    }
+                    
+                    if status in colors:
+                        security_item.setBackground(colors[status])
+                    
+                    # Устанавливаем всплывающую подсказку с подробностями
+                    tooltip = f"{scan_result['message']}"
+                    if "details" in scan_result:
+                        details = scan_result["details"]
+                        tooltip += f"\n\nДетали: {details}"
+                    
+                    security_item.setToolTip(tooltip)
+                else:
+                    # Если нет информации о безопасности
+                    self.set_table_item(row, 5, "⏳")
+                
                 # Кнопки действий
-                if not self.downloads_table.cellWidget(row, 5):
+                # Получаем статус загрузки как строку
+                download_status = download['status']
+                download_id = download['id']
+                
+                # Создаем виджет для кнопок если его нет, или обновляем существующий
+                actions_widget = self.downloads_table.cellWidget(row, 6)
+                if not actions_widget:
                     actions_widget = QWidget()
                     actions_layout = QHBoxLayout(actions_widget)
                     actions_layout.setContentsMargins(0, 0, 0, 0)
                     
                     # Кнопка паузы/возобновления
-                    pause_button = QPushButton("⏸️" if download['status'] == "Загрузка" else "▶️")
+                    pause_button = QPushButton()
                     pause_button.setFixedWidth(30)
-                    pause_button.clicked.connect(
-                        lambda checked, d_id=download['id']:
-                        self.download_manager.pause_download(d_id)
-                        if download['status'] == "Загрузка"
-                        else self.download_manager.resume_download(d_id)
-                    )
                     
                     # Кнопка отмены
                     cancel_button = QPushButton("❌")
                     cancel_button.setFixedWidth(30)
-                    cancel_button.clicked.connect(
-                        lambda checked, d_id=download['id']:
-                        self.download_manager.cancel_download(d_id)
-                    )
                     
                     actions_layout.addWidget(pause_button)
                     actions_layout.addWidget(cancel_button)
-                    self.downloads_table.setCellWidget(row, 5, actions_widget)
+                    self.downloads_table.setCellWidget(row, 6, actions_widget)
+                    
+                    # Создаем обработчики здесь, но они будут обновляться ниже
+                    pause_button.clicked.connect(lambda checked, d_id=download_id: self.toggle_pause_resume(d_id))
+                    cancel_button.clicked.connect(lambda checked, d_id=download_id: self.cancel_download(d_id))
+                else:
+                    # Если виджет уже существует, получаем его компоненты
+                    pause_button = actions_widget.layout().itemAt(0).widget()
+                    cancel_button = actions_widget.layout().itemAt(1).widget()
+                
+                # Обновляем текст кнопки в зависимости от статуса
+                if download_status == "Загрузка":
+                    pause_button.setText("⏸️")
+                    pause_button.setEnabled(True)
+                    cancel_button.setEnabled(True)
+                elif download_status == "Приостановлено":
+                    pause_button.setText("▶️")
+                    pause_button.setEnabled(True)
+                    cancel_button.setEnabled(True)
+                elif download_status == "В очереди":
+                    pause_button.setText("⏸️")
+                    pause_button.setEnabled(True)
+                    cancel_button.setEnabled(True)
+                else:
+                    # Если загрузка не активна или завершена, дизейблим кнопки
+                    pause_button.setEnabled(False)
+                    cancel_button.setEnabled(download_status not in ["Завершено", "Отменено", "Ошибка", "Ошибка доступа к файлу", "Ошибка сети"])
+                    pause_button.setText("⏸️" if download_status != "Приостановлено" else "▶️")
 
         except Exception as e:
             logger.error(f"Error updating downloads table: {e}")
+
+    def toggle_pause_resume(self, download_id):
+        """Переключение состояния паузы/возобновления загрузки"""
+        download_info = self.download_manager.get_download_by_id(download_id)
+        if download_info:
+            status = download_info['status']
+            if status == "Загрузка":
+                self.download_manager.pause_download(download_id)
+            elif status == "Приостановлено":
+                self.download_manager.resume_download(download_id)
+            elif status == "В очереди":
+                self.download_manager.pause_download(download_id)
+
+    def cancel_download(self, download_id):
+        """Отмена загрузки"""
+        download_info = self.download_manager.get_download_by_id(download_id)
+        if download_info:
+            # Проверяем, можно ли отменить загрузку
+            status = download_info['status']
+            if status in ["Загрузка", "Приостановлено", "В очереди"]:
+                self.download_manager.cancel_download(download_id)
+                
+    def clear_completed_downloads(self):
+        """Очистка завершенных загрузок"""
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение",
+            "Вы уверены, что хотите очистить завершенные загрузки?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.download_manager.clear_completed_downloads()
+            logger.info("Completed downloads cleared")
+            
+    def clear_all_downloads(self):
+        """Очистка всех загрузок"""
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение",
+            "Вы уверены, что хотите очистить все загрузки?\nАктивные загрузки будут отменены.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.download_manager.clear_all_downloads()
+            logger.info("All downloads cleared")
+            
+    def show_context_menu(self, position):
+        """Отображение контекстного меню для таблицы загрузок"""
+        row = self.downloads_table.rowAt(position.y())
+        if row < 0:
+            return
+            
+        menu = QMenu(self)
+        
+        # Получаем информацию о загрузке
+        download_id = self.get_download_id_by_row(row)
+        if not download_id:
+            return
+            
+        download_info = self.download_manager.get_download_by_id(download_id)
+        if not download_info:
+            return
+            
+        # Действия в зависимости от статуса загрузки
+        status = download_info['status']
+        
+        if status == "Загрузка":
+            pause_action = QAction("Приостановить", self)
+            pause_action.triggered.connect(lambda: self.toggle_pause_resume(download_id))
+            menu.addAction(pause_action)
+            
+            cancel_action = QAction("Отменить", self)
+            cancel_action.triggered.connect(lambda: self.cancel_download(download_id))
+            menu.addAction(cancel_action)
+        elif status == "Приостановлено":
+            resume_action = QAction("Возобновить", self)
+            resume_action.triggered.connect(lambda: self.toggle_pause_resume(download_id))
+            menu.addAction(resume_action)
+            
+            cancel_action = QAction("Отменить", self)
+            cancel_action.triggered.connect(lambda: self.cancel_download(download_id))
+            menu.addAction(cancel_action)
+        elif status == "Завершено":
+            open_folder_action = QAction("Открыть папку", self)
+            open_folder_action.triggered.connect(lambda: self.open_download_folder(download_info))
+            menu.addAction(open_folder_action)
+            
+            if "virus_scan" in download_info and "link" in download_info["virus_scan"]:
+                view_report_action = QAction("Подробный отчет безопасности", self)
+                view_report_action.triggered.connect(lambda: self.open_virus_report(download_info))
+                menu.addAction(view_report_action)
+        
+        # Общие действия
+        menu.addSeparator()
+        remove_action = QAction("Удалить из списка", self)
+        remove_action.triggered.connect(lambda: self.remove_download_from_list(download_id))
+        menu.addAction(remove_action)
+        
+        menu.exec_(self.downloads_table.viewport().mapToGlobal(position))
+        
+    def get_download_id_by_row(self, row):
+        """Получение ID загрузки по номеру строки в таблице"""
+        try:
+            downloads = self.download_manager.get_all_downloads()
+            if 0 <= row < len(downloads):
+                return downloads[row]["id"]
+        except Exception as e:
+            logger.error(f"Error getting download ID for row {row}: {e}")
+        return None
+        
+    def open_download_folder(self, download_info):
+        """Открытие папки с загруженным файлом"""
+        try:
+            path = download_info["path"]
+            folder = os.path.dirname(path)
+            os.startfile(folder)
+        except Exception as e:
+            logger.error(f"Error opening folder: {e}")
+            QMessageBox.warning(self, "Ошибка", f"Не удалось открыть папку: {str(e)}")
+            
+    def open_virus_report(self, download_info):
+        """Открытие отчета о безопасности в браузере"""
+        try:
+            report_link = download_info["virus_scan"]["link"]
+            import webbrowser
+            webbrowser.open(report_link)
+        except Exception as e:
+            logger.error(f"Error opening virus report: {e}")
+            QMessageBox.warning(self, "Ошибка", f"Не удалось открыть отчет: {str(e)}")
+            
+    def remove_download_from_list(self, download_id):
+        """Удаление загрузки из списка"""
+        # Это просто удаляет запись из интерфейса, но не удаляет файл
+        try:
+            # Найдем загрузку в списке и удалим её
+            for i, download in enumerate(self.download_manager.downloads):
+                if download.id == download_id:
+                    if download.status in ["Загрузка", "Приостановлено", "В очереди"]:
+                        # Сначала отменяем активную загрузку
+                        self.download_manager.cancel_download(download_id)
+                    
+                    # Удаляем запись
+                    self.download_manager.downloads.pop(i)
+                    break
+        except Exception as e:
+            logger.error(f"Error removing download from list: {e}")
+            QMessageBox.warning(self, "Ошибка", f"Не удалось удалить загрузку: {str(e)}")
 
     def set_table_item(self, row: int, column: int, text: str):
         """Вспомогательный метод для установки значения в ячейку таблицы"""
@@ -178,6 +419,7 @@ class MainWindow(QMainWindow):
             self.downloads_table.setItem(row, column, item)
         item.setText(text)
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # Делаем ячейку нередактируемой
+        return item
 
     def closeEvent(self, event):
         """Обработчик закрытия окна"""

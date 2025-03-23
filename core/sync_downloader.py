@@ -11,8 +11,57 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 import re
+from config.settings import settings
+import json
+from core.virus_scanner import VirusScanner
 
 logger = logging.getLogger(__name__)
+
+def get_softportal_direct_url(url: str) -> str:
+    """Получение прямой ссылки на скачивание с softportal.com"""
+    try:
+        # Создаем сессию для сохранения cookies
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        })
+        
+        # Получаем страницу
+        response = session.get(url)
+        response.raise_for_status()
+        
+        # Ищем ID файла в HTML
+        file_id_match = re.search(r'getsoft-(\d+)', url)
+        if not file_id_match:
+            raise Exception("Не удалось найти ID файла в URL")
+            
+        file_id = file_id_match.group(1)
+        
+        # Получаем информацию о файле через API
+        api_url = f"https://www.softportal.com/api/file/{file_id}"
+        response = session.get(api_url)
+        response.raise_for_status()
+        file_info = response.json()
+        
+        if "download_url" not in file_info:
+            raise Exception("Не удалось получить ссылку на скачивание")
+            
+        return file_info["download_url"]
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении прямой ссылки с softportal.com: {e}")
+        raise
+
+def get_direct_url(url: str) -> str:
+    """Получение прямой ссылки на скачивание в зависимости от сайта"""
+    if "softportal.com" in url:
+        return get_softportal_direct_url(url)
+    return url
 
 def sanitize_filename(filename: str) -> str:
     """Очистка имени файла от недопустимых символов"""
@@ -67,7 +116,7 @@ class Download:
         self.path = path
         self.name = filename or sanitize_filename(os.path.basename(urlparse(url).path)) or "noname"
         self.size = 0
-        self.progress = 0
+        self.progress = 0  # Теперь храним как число
         self.speed = "0 B/s"
         self.status = "В очереди"
         self.created = time.time()
@@ -77,24 +126,34 @@ class Download:
         self.thread = None
         self.md5 = ""
         self.sha1 = ""
+        self.virus_scan_result = {}  # Результаты сканирования на вирусы
         
     def to_dict(self) -> Dict:
-        return {
+        # Убеждаемся, что прогресс - числовой тип
+        progress_value = float(self.progress) if not isinstance(self.progress, (int, float)) else self.progress
+        
+        result = {
             "id": self.id,
             "url": self.url,
             "path": str(self.path),
             "name": self.name,
             "size": format_size(self.size),
-            "progress": self.progress,
+            "progress": f"{progress_value:.1f}%",  # Форматируем как строку с процентом
             "speed": self.speed,
             "status": self.status,
             "created": self.created,
             "md5": self.md5,
             "sha1": self.sha1
         }
+        
+        # Добавляем информацию о проверке на вирусы, если она доступна
+        if self.virus_scan_result:
+            result["virus_scan"] = self.virus_scan_result
+            
+        return result
 
     def __repr__(self):
-        return f"Download({self.name}, {self.status}, {self.progress}%)"
+        return f"Download({self.name}, {self.status}, {self.progress:.1f}%)"
 
 class DownloadManager:
     def __init__(self, max_workers: int = 5):
@@ -105,7 +164,7 @@ class DownloadManager:
         # Пул потоков для загрузок
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         
-        # Пул потоков для вычисления хешей
+        # Пул потоков для вычисления хешей и сканирования
         self.hash_executor = ThreadPoolExecutor(max_workers=2)
         
         # Очередь для коммуникации между потоками
@@ -114,6 +173,9 @@ class DownloadManager:
         # Запускаем обработчик очереди
         self.queue_thread = threading.Thread(target=self._queue_processor, daemon=True)
         self.queue_thread.start()
+        
+        # Инициализируем сканер вирусов
+        self.virus_scanner = VirusScanner()
         
         logger.info(f"Download Manager initialized with {max_workers} workers")
 
@@ -141,120 +203,187 @@ class DownloadManager:
             finally:
                 self.queue.task_done()
 
-    def _download(self, url: str, path: Path):
-        """Синхронная загрузка файла"""
-        # Создаем имя файла из URL
-        filename = sanitize_filename(os.path.basename(urlparse(url).path))
-        path = path.parent / filename
-        download = Download(url, path, filename)
-        self.downloads.append(download)
-
-        def download_worker():
-            try:
-                # Получаем информацию о файле
-                response = requests.head(url, allow_redirects=True)
-                if response.status_code != 200:
-                    download.status = f"Ошибка: HTTP {response.status_code}"
-                    return
-
-                download.size = int(response.headers.get("content-length", 0))
-                download.status = "Загрузка"
-
-                # Проверяем, существует ли файл для возобновления загрузки
-                if path.exists():
-                    resume_pos = path.stat().st_size
-                    if resume_pos >= download.size and download.size > 0:
-                        download.progress = 100
-                        download.status = "Завершено"
-                        download.bytes_downloaded = download.size
-                        self._calculate_hashes(download)
-                        return
-                else:
-                    resume_pos = 0
-                    # Создаем файл и папку, если нужно
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.touch()
-
-                # Загружаем файл
-                headers = {}
-                if resume_pos > 0:
-                    headers["Range"] = f"bytes={resume_pos}-"
-
-                response = requests.get(url, headers=headers, stream=True)
-                if response.status_code not in (200, 206):
-                    download.status = f"Ошибка: HTTP {response.status_code}"
-                    return
-
-                # Инициализация для расчета скорости
-                start_time = time.time()
-                prev_downloaded = resume_pos
-                download.bytes_downloaded = resume_pos
-
-                # Открываем файл для записи
-                with open(path, "ab") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if download.is_canceled:
-                            if path.exists():
-                                os.unlink(path)
-                            download.status = "Отменено"
-                            return
+    def _download(self, url: str, path: Path) -> None:
+        """Скачивает файл по указанному URL"""
+        try:
+            # Получаем прямую ссылку на скачивание
+            direct_url = get_direct_url(url)
+            
+            # Создаем сессию для скачивания
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+            })
+            
+            # Создаем объект загрузки
+            filename = sanitize_filename(os.path.basename(urlparse(direct_url).path))
+            file_path = path if isinstance(path, Path) else Path(path)
+            
+            # Если path - это директория, добавляем имя файла
+            if file_path.is_dir() or not file_path.suffix:
+                file_path = file_path / filename
+            
+            download = Download(url, file_path, filename)
+            self.downloads.append(download)
+            
+            def download_worker():
+                try:
+                    # Обработка случая, когда файл уже существует или занят
+                    original_path = download.path
+                    retry_count = 0
+                    max_retries = 5
+                    
+                    while retry_count < max_retries:
+                        if os.path.exists(download.path):
+                            try:
+                                # Пытаемся открыть файл для проверки доступности
+                                with open(download.path, 'a+b') as f:
+                                    pass
+                                # Если файл доступен и можно перезаписать, удаляем его
+                                os.remove(download.path)
+                                break
+                            except (PermissionError, OSError):
+                                # Если файл занят, создаем новый путь с уникальным именем
+                                base, ext = os.path.splitext(str(original_path))
+                                unique_suffix = uuid.uuid4().hex[:8]
+                                download.path = Path(f"{base}_{unique_suffix}{ext}")
+                                download.name = os.path.basename(str(download.path))
+                                retry_count += 1
+                        else:
+                            # Файл не существует, можно продолжать
+                            break
+                    
+                    # Создаем родительские директории, если они не существуют
+                    parent_dir = os.path.dirname(download.path)
+                    if parent_dir:
+                        os.makedirs(parent_dir, exist_ok=True)
+                    
+                    # Получаем размер файла
+                    response = session.head(direct_url)
+                    total_size = int(response.headers.get('content-length', 0))
+                    download.size = total_size
+                    
+                    # Устанавливаем начальные значения
+                    download.status = "Загрузка"
+                    download.progress = 0
+                    download.bytes_downloaded = 0
+                    
+                    # Открываем файл для записи
+                    with open(download.path, 'wb') as f:
+                        # Скачиваем файл с отображением прогресса
+                        response = session.get(direct_url, stream=True)
+                        response.raise_for_status()
                         
-                        if download.is_paused:
-                            download.status = "Приостановлено"
-                            while download.is_paused and not download.is_canceled:
-                                time.sleep(0.5)
-                            if download.is_canceled:
-                                if path.exists():
-                                    os.unlink(path)
-                                download.status = "Отменено"
+                        downloaded_size = 0
+                        start_time = time.time()
+                        last_update_time = start_time
+                        chunk_size = 8192 * 4  # Увеличен размер чанка для оптимизации
+                        
+                        for chunk in response.iter_content(chunk_size=chunk_size):
+                            if download.is_canceled or download.status == "Отменено":
+                                if os.path.exists(download.path):
+                                    os.remove(download.path)
                                 return
-                            download.status = "Загрузка"
+                                
+                            if download.is_paused or download.status == "Пауза":
+                                while download.is_paused or download.status == "Пауза":
+                                    time.sleep(0.1)
+                                    if download.is_canceled or download.status == "Отменено":
+                                        if os.path.exists(download.path):
+                                            os.remove(download.path)
+                                        return
+                                    
+                            if chunk:
+                                f.write(chunk)
+                                downloaded_size += len(chunk)
+                                download.bytes_downloaded = downloaded_size
+                                
+                                # Прогресс
+                                if total_size > 0:
+                                    download.progress = (downloaded_size / total_size) * 100
+                                
+                                # Обновляем скорость каждую секунду
+                                current_time = time.time()
+                                if current_time - last_update_time >= 1:
+                                    elapsed = current_time - start_time
+                                    if elapsed > 0:
+                                        speed = downloaded_size / elapsed
+                                        download.speed = format_speed(speed)
+                                    last_update_time = current_time
                         
-                        if chunk:
-                            f.write(chunk)
-                            download.bytes_downloaded += len(chunk)
-                            
-                            # Обновляем прогресс
-                            if download.size > 0:
-                                download.progress = int((download.bytes_downloaded / download.size) * 100)
-                            
-                            # Обновляем скорость
-                            current_time = time.time()
-                            elapsed = current_time - start_time
-                            if elapsed > 1:
-                                speed = (download.bytes_downloaded - prev_downloaded) / elapsed
-                                download.speed = format_speed(speed)
-                                start_time = current_time
-                                prev_downloaded = download.bytes_downloaded
-
-                download.progress = 100
-                download.status = "Завершено"
-                download.speed = "0 B/s"
-                
-                # Вычисляем хеши
-                self._calculate_hashes(download)
-
-            except requests.RequestException as e:
-                download.status = f"Ошибка: {str(e)}"
-                logger.error(f"Error downloading {url}: {e}")
-            except Exception as e:
-                download.status = f"Ошибка: {str(e)}"
-                logger.error(f"Error downloading {url}: {e}")
-
-        # Запускаем загрузку в отдельном потоке
-        download.thread = self.executor.submit(download_worker)
+                        # Завершаем загрузку
+                        if downloaded_size > 0:
+                            if total_size > 0 and downloaded_size >= total_size * 0.99:  # учитываем погрешность
+                                download.progress = 100
+                                download.status = "Завершено"
+                                # Вычисляем хеши файла
+                                self._calculate_hashes(download)
+                            else:
+                                # Если размер файла неизвестен, но данные были загружены
+                                download.status = "Завершено"
+                                self._calculate_hashes(download)
+                        else:
+                            download.status = "Ошибка"
+                    
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"Ошибка сети при скачивании {url}: {e}")
+                    download.status = "Ошибка сети"
+                    download.progress = 0
+                except (PermissionError, OSError) as e:
+                    logger.error(f"Ошибка доступа к файлу при скачивании {url}: {e}")
+                    download.status = "Ошибка доступа к файлу"
+                    download.progress = 0
+                except Exception as e:
+                    logger.error(f"Ошибка при скачивании {url}: {e}")
+                    download.status = "Ошибка"
+                    download.progress = 0
+            
+            # Запускаем загрузку в отдельном потоке
+            download.thread = self.executor.submit(download_worker)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении загрузки {url}: {e}")
+            raise
 
     def _calculate_hashes(self, download: Download):
-        """Вычисление контрольных сумм файла"""
+        """Вычисление контрольных сумм файла и проверка на вирусы"""
         download.status = "Проверка файла..."
         
         try:
             download.md5 = calculate_hash(download.path, "md5")
             download.sha1 = calculate_hash(download.path, "sha1")
+            
+            # После вычисления хешей проверяем файл на вирусы
+            self._scan_for_viruses(download)
+            
             download.status = "Завершено"
         except Exception as e:
             logger.error(f"Error calculating hashes for {download.path}: {e}")
             download.status = "Завершено (ошибка проверки)"
+
+    def _scan_for_viruses(self, download: Download):
+        """Проверка файла на вирусы"""
+        try:
+            # Проверяем файл на вирусы
+            if getattr(settings, 'virustotal_api_key', ''):
+                # Если есть API ключ, используем реальное сканирование
+                scan_result = self.virus_scanner.scan_file(str(download.path))
+            else:
+                # Иначе используем имитацию сканирования
+                scan_result = self.virus_scanner.mock_scan_result(str(download.path))
+                
+            # Сохраняем результат сканирования
+            download.virus_scan_result = scan_result
+            
+            # Добавляем информацию о сканировании в лог
+            logger.info(f"Virus scan result for {download.name}: {scan_result['status']} - {scan_result['message']}")
+            
+        except Exception as e:
+            logger.error(f"Error scanning file {download.path} for viruses: {e}")
+            download.virus_scan_result = {
+                "status": "error",
+                "message": f"Ошибка при проверке файла: {e}"
+            }
 
     def _pause_download(self, download_id: str):
         """Пауза загрузки"""
@@ -355,4 +484,20 @@ class DownloadManager:
         
         self.executor.shutdown(wait=False)
         self.hash_executor.shutdown(wait=False)
-        logger.info("Download Manager shut down") 
+        logger.info("Download Manager shut down")
+
+    def clear_completed_downloads(self):
+        """Очистка завершенных загрузок"""
+        self.downloads = [d for d in self.downloads if d.status not in [
+            "Завершено", "Ошибка", "Отменено", "Ошибка доступа к файлу", "Ошибка сети"
+        ]]
+        
+    def clear_all_downloads(self):
+        """Очистка всех загрузок"""
+        # Сначала отменяем все активные загрузки
+        for download in self.downloads:
+            if download.status in ["Загрузка", "Приостановлено", "В очереди"]:
+                self.cancel_download(download.id)
+        
+        # Затем очищаем список
+        self.downloads = [] 
