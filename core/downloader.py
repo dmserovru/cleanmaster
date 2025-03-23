@@ -93,20 +93,32 @@ class DownloadManager:
         self.executor = ThreadPoolExecutor(max_workers=2)
         
         # Создаем семафор для ограничения количества одновременных загрузок
-        self.semaphore = asyncio.Semaphore(max_workers, loop=self.loop)
+        self.semaphore = asyncio.Semaphore(max_workers)
         
         # Очередь для коммуникации между потоками
-        self.queue = asyncio.Queue(loop=self.loop)
+        self.queue = asyncio.Queue()
+        
+        # Сессия для HTTP-запросов
+        self.session = None
+        self.session_ready = threading.Event()
         
         # Запускаем обработчик очереди
         asyncio.run_coroutine_threadsafe(self._queue_processor(), self.loop)
+        
+        # Ждем инициализации сессии
+        self.session_ready.wait(timeout=5)
         
         logger.info(f"Download Manager initialized with {max_workers} workers")
 
     def _run_event_loop(self):
         """Запуск цикла обработки событий в отдельном потоке"""
         asyncio.set_event_loop(self.loop)
-        self.session = aiohttp.ClientSession(loop=self.loop)
+        
+        async def init_session():
+            self.session = aiohttp.ClientSession()
+            self.session_ready.set()
+        
+        self.loop.run_until_complete(init_session())
         self.loop.run_forever()
 
     async def _queue_processor(self):
@@ -137,51 +149,51 @@ class DownloadManager:
         """Асинхронная загрузка файла"""
         download = Download(url, path)
         self.downloads.append(download)
-        
+
         try:
             async with self.semaphore:
                 if download.is_canceled:
                     return
-                    
+
                 # Получаем информацию о файле
                 async with self.session.head(url, allow_redirects=True) as response:
                     if response.status != 200:
                         download.status = f"Ошибка: HTTP {response.status}"
                         return
-                        
+
                     download.size = int(response.headers.get('content-length', 0))
-                
+
                 download.status = "Загрузка"
-                
+
                 # Проверяем, существует ли файл для возобновления загрузки
-            if path.exists():
-                resume_pos = path.stat().st_size
+                if path.exists():
+                    resume_pos = path.stat().st_size
                     if resume_pos >= download.size and download.size > 0:
                         download.progress = 100
                         download.status = "Завершено"
                         download.bytes_downloaded = download.size
                         await self._calculate_hashes(download)
                         return
-            else:
-                resume_pos = 0
+                else:
+                    resume_pos = 0
                     # Создаем файл и папку, если нужно
                     path.parent.mkdir(parents=True, exist_ok=True)
-                path.touch()
+                    path.touch()
 
                 # Устанавливаем размер чанка в зависимости от размера файла
                 if download.size > 100 * 1024 * 1024:  # Более 100MB
                     chunk_size = 5 * 1024 * 1024  # 5MB
                 else:
                     chunk_size = 1 * 1024 * 1024  # 1MB
-                
+
                 # Инициализация для расчета скорости
-            start_time = time.time()
+                start_time = time.time()
                 prev_downloaded = resume_pos
                 download.bytes_downloaded = resume_pos
-                
+
                 # Создаем задачи для загрузки кусков файла
-            tasks = []
-            
+                tasks = []
+
                 # Если размер 0, просто создаем пустой файл
                 if download.size == 0:
                     download.progress = 100
@@ -446,7 +458,11 @@ class DownloadManager:
             if download.status == "Загрузка":
                 download.is_paused = True
         
-        asyncio.run_coroutine_threadsafe(self.session.close(), self.loop)
+        async def close_session():
+            if self.session:
+                await self.session.close()
+        
+        asyncio.run_coroutine_threadsafe(close_session(), self.loop)
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(timeout=2.0)
         self.executor.shutdown(wait=False)
