@@ -97,5 +97,5 @@ pyinstaller --onefile --windowed --icon=resources/app_icon.ico --name=CleanDownl
 
 ## Контакты
 
-- Email: your.email@example.com
-- Telegram: @yourusername
+- Email: 1@dmserov.ru
+- Telegram: @yanis111111
