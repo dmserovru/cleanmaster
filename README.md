@@ -44,7 +44,7 @@
 
 ### Скачать готовую сборку
 
-1. Скачайте последнюю версию с [страницы релизов](https://github.com/yourusername/cleandownloader/releases)
+1. Скачайте последнюю версию с [страницы релизов](https://github.com/dmserovru/cleanmaster/releases)
 2. Распакуйте архив
 3. Запустите `CleanDownloader.exe`
 
